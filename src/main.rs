@@ -12,7 +12,6 @@ use std::thread;
 // use std::time::Duration;
 
 const NUM_OF_THREADS: usize = 8;
-const LIFETIME: u32 = 1000;
 
 // struct Actor { state + receive + mailbox }
 // struct Thread { JoinHandle, message queue }
@@ -32,7 +31,7 @@ struct Actor {
 
 impl Actor {
     // TODO: we should be able to send system messages as well
-    fn receive(message: Message, state: u32) -> (u32, Option<Vec<Message>>) {
+    fn receive(_message: Message, state: u32) -> (u32, Option<Vec<Message>>) {
         // example actor implementation
         // in the future will be trait that every actor will have to implement
         (state, None)
@@ -101,7 +100,7 @@ impl ActorSystem {
                             match actors.entry(pid) {
                                 Vacant(_) => continue,
                                 Occupied(entry) => {
-                                    let mut a: &mut Actor = entry.into_mut() as &mut Actor;
+                                    let a: &mut Actor = entry.into_mut() as &mut Actor;
                                     match a.mailbox.lock().unwrap().pop_front() {
                                         None => continue,
                                         Some(msg) => {
