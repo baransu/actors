@@ -53,17 +53,16 @@ struct ActorSystem {
 }
 
 
-fn should_i_die(front: &Option<&SystemMessage>) -> bool {
-    match *front {
-        None => false,
-        Some(msg) => {
-            match *msg {
-                // thread received order to die
-                SystemMessage::Die => true,
-                _ => false,
-            }
-        }
+fn should_i_die(msg: SystemMessage) -> bool {
+    match msg {
+        SystemMessage::Die => true,
+        _ => false,
     }
+}
+
+#[derive(Debug)]
+enum MessageQueueError {
+    Empty,
 }
 
 struct MessageQueue<T> {
@@ -85,9 +84,46 @@ impl<T> MessageQueue<T> {
             sleeping: self.sleeping.clone(),
         }
     }
-}
 
-// unsafe impl<T: Copy> Send for Sender<T> { }
+    fn send(&self, msg: T) {
+        let &(ref sguard, ref scvar) = &*self.sleeping;
+        let mut guard = sguard.lock().unwrap();
+        let mut queue = self.queue.lock().unwrap();
+        (*queue).push_back(msg);
+        *guard = true;
+        scvar.notify_one();
+    }
+
+    fn try_recv(&self) -> Result<T, MessageQueueError> {
+        let mut queue = self.queue.lock().unwrap();
+        match queue.pop_front() {
+            Some(t) => Ok(t),
+            None => Err(MessageQueueError::Empty),
+        }
+    }
+
+    fn recv(&self) -> Result<T, MessageQueueError> {
+        match self.try_recv() {
+            Ok(head) => return Ok(head),
+            Err(MessageQueueError::Empty) => (),
+        }
+
+        let ret;
+        let &(ref sguard, ref scvar) = &*self.sleeping;
+        let mut guard = sguard.lock().unwrap();
+        loop {
+            match self.try_recv() {
+                Ok(t) => {
+                    ret = Ok(t);
+                    break;
+                }
+                Err(MessageQueueError::Empty) => (),
+            }
+            guard = scvar.wait(guard).unwrap();
+        }
+        ret
+    }
+}
 
 impl ActorSystem {
     fn new() -> ActorSystem {
@@ -104,44 +140,22 @@ impl ActorSystem {
             let threads_queue = threads_queue.clone();
             thread::spawn(move || {
 
-                // threads queue - spmc (supervisor to threads)
-                // let &(ref tlock, ref tcvar) = &*threads_queue.sleeping;
-
-                // global queue - mpsc (threads to supervisor)
-                let &(ref glock, ref gcvar) = &*global_queue.sleeping;
-
                 loop {
-                    // let mut new_messages = tlock.lock().unwrap();
-                    // let result = tcvar
-                    //     .wait_timeout(new_messages, Duration::from_millis(10))
-                    //     .unwrap();
-                    // // 10 milliseconds have passed, or maybe the value changed!
-                    // new_messages = result.0;
-                    // let queue = threads_queue.queue.lock().unwrap();
-                    // let head = queue.front();
-                    // println!("New messages, {}, {:?}", *new_messages, head);
-                    // if !*new_messages {
-                    //     continue;
-                    // }
-                    let im_dying = true;
-                    // {
-                    //     let mut queue = threads_queue.queue.lock().unwrap();
-                    //     let head = queue.front();
-                    //     should_i_die(&head)
-                    // };
+                    let im_dying = {
+                        let head = threads_queue.recv();
+                        match head {
+                            Err(_) => continue,
+                            Ok(msg) => should_i_die(msg),
+                        }
+                    };
 
                     println!("Should I die: {}", im_dying);
-                    thread::sleep_ms(100);
+
                     if im_dying {
-                        let mut g_changes = glock.lock().unwrap();
                         println!("Thread: {} is dying", thread_id);
-                        let mut queue = global_queue.queue.lock().unwrap();
-                        (*queue).push_back(SystemMessage::Died(thread_id));
-                        *g_changes = true;
-                        gcvar.notify_one();
+                        global_queue.send(SystemMessage::Died(thread_id));
                         break;
                     }
-
 
                     println!("Thread {} is running", thread_id);
 
@@ -153,6 +167,7 @@ impl ActorSystem {
                             // we have some actor, now we have get his body and process him
                             let mut actors = actors_map.lock().unwrap();
                             match actors.entry(pid) {
+                                // there is not longer actor with this pid, we should skip the message
                                 Vacant(_) => continue,
                                 Occupied(entry) => {
                                     let a: &mut Actor = entry.into_mut() as &mut Actor;
@@ -178,16 +193,6 @@ impl ActorSystem {
                             }
                         }
                     }
-
-                    // q.push_back(Messages::Heartbeat {
-                    //     thread_id: thread_id,
-                    //     payload: i,
-                    // });
-                    // i = i + 1;
-                    // if i > LIFETIME {
-                    //     q.push_back(Messages::Stop { thread_id: thread_id });
-                    //     break;
-                    // }
                 }
             });
             alive_threads += 1;
@@ -228,72 +233,31 @@ enum SystemMessage {
     Died(usize),
 }
 
-// TODO: concider producer - consumer design
-// https://www.reddit.com/r/rust/comments/5w7fwo/whats_the_best_way_to_do_producer_consumer_in_rust/
-// https://github.com/seanmonstar/spmc
-
 fn main() {
     let mut system = ActorSystem::new();
-    // let mut i = 0;
-    // loop {
-    //     match queue.lock().unwrap().pop_front() {
-    //         Some(msg) => {
-    //             match msg {
-    //                 Messages::Heartbeat { thread_id, payload } => {
-    //                     println!("Message from {} is: {}", thread_id, payload);
-    //                 }
-    //                 Messages::Stop { thread_id } => {
-    //                     println!("The winner is {}!", thread_id);
-    //                     break;
-    //                 }
-    //                 _ => (),
-    //             }
-    //         }
-    //         None => (),
-    //     }
-    // }
 
-    let &(ref tlock, ref tcvar) = &*system.threads_queue.sleeping;
-
-    let mut queue = system.threads_queue.queue.lock().unwrap();
+    // kill all threads
     for _ in 0..NUM_OF_THREADS {
-        (*queue).push_back(SystemMessage::Die);
+        system.threads_queue.send(SystemMessage::Die);
         println!("Pushed death order")
     }
 
-    // notify all about death order
-    let mut t_changes = tlock.lock().unwrap();
-    *t_changes = true;
-    tcvar.notify_one();
-
-    let &(ref glock, ref gcvar) = &*system.global_queue.sleeping;
+    // wait for all threads death
     while system.alive_threads > 0 {
-        let mut g_changes = glock.lock().unwrap();
-        println!("Started waiting for changes");
-        // TODO: try receive or wait
-        g_changes = gcvar.wait(g_changes).unwrap();
-        println!("Global changes: {}", g_changes);
-        if !*g_changes {
-            continue;
-        }
-        let mut queue = system.global_queue.queue.lock().unwrap();
-        match (*queue).pop_front() {
-            None => continue,
-            Some(msg) => {
+        let head = system.global_queue.recv();
+        match head {
+            Ok(msg) => {
                 match msg {
                     SystemMessage::Died(id) => {
                         println!("Thread {} died!", id);
                         system.alive_threads -= 1;
                         println!("Alive threads: {}", system.alive_threads);
-                        let messages_left = (*queue).len();
-                        println!("Messages left: {}", messages_left);
-                        if messages_left > 0 {
-                            continue;
-                        }
                     }
-                    _ => continue,
+                    _ => (),
                 }
             }
+            Err(_) => println!("Head is empty"),
+
         }
     }
 }
