@@ -7,9 +7,9 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::VecDeque;
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex, Arc, Condvar};
 use std::thread;
-// use std::time::Duration;
+use std::time::Duration;
 
 const NUM_OF_THREADS: usize = 8;
 
@@ -38,10 +38,11 @@ impl Actor {
     }
 }
 
-type GlobalQueue = Arc<Mutex<VecDeque<SystemMessage>>>;
+type Queue = MessageQueue<SystemMessage>;
+type GlobalQueue = Queue;
 type ActorsQueue = Arc<Mutex<VecDeque<Uuid>>>;
 type ActorsMap = Arc<Mutex<HashMap<Uuid, Actor>>>;
-type ThreadsQueue = Arc<Mutex<VecDeque<SystemMessage>>>;
+type ThreadsQueue = Queue;
 
 struct ActorSystem {
     global_queue: GlobalQueue,
@@ -51,45 +52,99 @@ struct ActorSystem {
     alive_threads: usize,
 }
 
+
+fn should_i_die(front: &Option<&SystemMessage>) -> bool {
+    match *front {
+        None => false,
+        Some(msg) => {
+            match *msg {
+                // thread received order to die
+                SystemMessage::Die => true,
+                _ => false,
+            }
+        }
+    }
+}
+
+struct MessageQueue<T> {
+    queue: Arc<Mutex<VecDeque<T>>>,
+    sleeping: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl<T> MessageQueue<T> {
+    fn new() -> MessageQueue<T> {
+        MessageQueue {
+            queue: Arc::new(Mutex::new(VecDeque::new())),
+            sleeping: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn clone(&self) -> MessageQueue<T> {
+        MessageQueue {
+            queue: self.queue.clone(),
+            sleeping: self.sleeping.clone(),
+        }
+    }
+}
+
+// unsafe impl<T: Copy> Send for Sender<T> { }
+
 impl ActorSystem {
     fn new() -> ActorSystem {
-        let global_queue: GlobalQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let global_queue: Queue = MessageQueue::new();
         let actors_queue: ActorsQueue = Arc::new(Mutex::new(VecDeque::new()));
-        let threads_queue: ThreadsQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let threads_queue: Queue = MessageQueue::new();
         let actors_map: ActorsMap = Arc::new(Mutex::new(HashMap::new()));
         let mut alive_threads = 0;
 
         for thread_id in 0..NUM_OF_THREADS {
-            let global_queue = Arc::clone(&global_queue);
-            let actors_queue = Arc::clone(&actors_queue);
-            let actors_map = Arc::clone(&actors_map);
-            let threads_queue = Arc::clone(&threads_queue);
-            let _ = thread::spawn(move || {
-                loop {
-                    let should_i_die = {
-                        match threads_queue.lock().unwrap().front() {
-                            None => false,
-                            Some(msg) => {
-                                match *msg {
-                                    // thread received order to die
-                                    SystemMessage::Die(id) => id == thread_id,
-                                    _ => false,
-                                }
-                            }
-                        }
-                    };
+            let global_queue = global_queue.clone();
+            let actors_queue = actors_queue.clone();
+            let actors_map = actors_map.clone();
+            let threads_queue = threads_queue.clone();
+            thread::spawn(move || {
 
-                    if should_i_die {
-                        threads_queue.lock().unwrap().pop_front();
+                // threads queue - spmc (supervisor to threads)
+                // let &(ref tlock, ref tcvar) = &*threads_queue.sleeping;
+
+                // global queue - mpsc (threads to supervisor)
+                let &(ref glock, ref gcvar) = &*global_queue.sleeping;
+
+                loop {
+                    // let mut new_messages = tlock.lock().unwrap();
+                    // let result = tcvar
+                    //     .wait_timeout(new_messages, Duration::from_millis(10))
+                    //     .unwrap();
+                    // // 10 milliseconds have passed, or maybe the value changed!
+                    // new_messages = result.0;
+                    // let queue = threads_queue.queue.lock().unwrap();
+                    // let head = queue.front();
+                    // println!("New messages, {}, {:?}", *new_messages, head);
+                    // if !*new_messages {
+                    //     continue;
+                    // }
+                    let im_dying = true;
+                    // {
+                    //     let mut queue = threads_queue.queue.lock().unwrap();
+                    //     let head = queue.front();
+                    //     should_i_die(&head)
+                    // };
+
+                    println!("Should I die: {}", im_dying);
+                    thread::sleep_ms(100);
+                    if im_dying {
+                        let mut g_changes = glock.lock().unwrap();
                         println!("Thread: {} is dying", thread_id);
-                        global_queue.lock().unwrap().push_back(
-                            SystemMessage::Died(thread_id),
-                        );
+                        let mut queue = global_queue.queue.lock().unwrap();
+                        (*queue).push_back(SystemMessage::Died(thread_id));
+                        *g_changes = true;
+                        gcvar.notify_one();
                         break;
                     }
 
+
                     println!("Thread {} is running", thread_id);
-                    thread::sleep_ms(100);
+
                     let mut aq = actors_queue.lock().unwrap();
                     match aq.pop_front() {
                         None => continue,
@@ -139,11 +194,11 @@ impl ActorSystem {
         }
 
         ActorSystem {
-            global_queue: global_queue,
-            actors_queue: actors_queue,
-            actors_map: actors_map,
-            threads_queue: threads_queue,
-            alive_threads: alive_threads,
+            global_queue,
+            actors_queue,
+            actors_map,
+            threads_queue,
+            alive_threads,
         }
     }
 
@@ -167,10 +222,15 @@ impl ActorSystem {
 }
 
 // SystemMessages are available in all actors and allow us to interact with actor system in the runtime
+#[derive(Debug)]
 enum SystemMessage {
-    Die(usize),
+    Die,
     Died(usize),
 }
+
+// TODO: concider producer - consumer design
+// https://www.reddit.com/r/rust/comments/5w7fwo/whats_the_best_way_to_do_producer_consumer_in_rust/
+// https://github.com/seanmonstar/spmc
 
 fn main() {
     let mut system = ActorSystem::new();
@@ -193,40 +253,47 @@ fn main() {
     //     }
     // }
 
-    thread::sleep_ms(5000);
-    for thread_id in 0..NUM_OF_THREADS {
-        system.threads_queue.lock().unwrap().push_back(
-            SystemMessage::Die(
-                thread_id,
-            ),
-        );
+    let &(ref tlock, ref tcvar) = &*system.threads_queue.sleeping;
+
+    let mut queue = system.threads_queue.queue.lock().unwrap();
+    for _ in 0..NUM_OF_THREADS {
+        (*queue).push_back(SystemMessage::Die);
         println!("Pushed death order")
     }
 
-    loop {
-        if system.alive_threads == 0 {
-            break;
+    // notify all about death order
+    let mut t_changes = tlock.lock().unwrap();
+    *t_changes = true;
+    tcvar.notify_one();
+
+    let &(ref glock, ref gcvar) = &*system.global_queue.sleeping;
+    while system.alive_threads > 0 {
+        let mut g_changes = glock.lock().unwrap();
+        println!("Started waiting for changes");
+        // TODO: try receive or wait
+        g_changes = gcvar.wait(g_changes).unwrap();
+        println!("Global changes: {}", g_changes);
+        if !*g_changes {
+            continue;
         }
-        match system.global_queue.lock().unwrap().pop_front() {
+        let mut queue = system.global_queue.queue.lock().unwrap();
+        match (*queue).pop_front() {
             None => continue,
             Some(msg) => {
                 match msg {
                     SystemMessage::Died(id) => {
                         println!("Thread {} died!", id);
                         system.alive_threads -= 1;
+                        println!("Alive threads: {}", system.alive_threads);
+                        let messages_left = (*queue).len();
+                        println!("Messages left: {}", messages_left);
+                        if messages_left > 0 {
+                            continue;
+                        }
                     }
                     _ => continue,
                 }
             }
         }
     }
-
-
-    // for thread in threads {
-    //     thread.join().unwrap();
-    // }
-
-    // for a in actors.lock().unwrap().iter() {
-    //     println!("Actor state is: {}", a)
-    // }
 }
