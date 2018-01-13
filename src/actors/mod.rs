@@ -2,6 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 pub mod message_queue;
+pub mod root_actor;
 
 pub mod context;
 pub use self::context::Context;

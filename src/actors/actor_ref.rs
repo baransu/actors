@@ -1,6 +1,6 @@
 extern crate uuid;
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use uuid::Uuid;
 use std::sync::{Mutex, Arc};
 use std::any::Any;
@@ -11,6 +11,7 @@ pub struct ActorRef {
     pub pid: Uuid,
     pub inner: Arc<Actor>,
     pub mailbox: Arc<Mutex<VecDeque<Envelope>>>,
+    pub children: Arc<Mutex<HashMap<Uuid, ActorRef>>>,
 }
 
 pub struct Envelope {
@@ -29,6 +30,7 @@ impl ActorRef {
             pid,
             inner: actor.clone(),
             mailbox: Arc::new(Mutex::new(VecDeque::new())),
+            children: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -39,6 +41,7 @@ impl Clone for ActorRef {
             pid: self.pid,
             inner: self.inner.clone(),
             mailbox: self.mailbox.clone(),
+            children: self.children.clone(),
         }
     }
 }

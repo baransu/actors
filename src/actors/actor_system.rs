@@ -1,8 +1,8 @@
 extern crate uuid;
 
 use uuid::Uuid;
-use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
+// use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::any::Any;
 
@@ -10,6 +10,7 @@ use actors::context::Context;
 use actors::actor_ref::{InnerMessage, Envelope};
 use actors::message_queue::MessageQueue;
 use actors::{Actor, Message, ActorRef};
+use actors::root_actor::RootActor;
 
 #[derive(Debug)]
 enum SystemMessage {
@@ -17,49 +18,60 @@ enum SystemMessage {
 }
 
 enum ThreadMessage {
-    // Die,
+    Die(usize),
     Actor(ActorRef),
 }
 
 pub struct ActorSystem {
     global_queue: MessageQueue<SystemMessage>,
-    actors_map: Arc<Mutex<HashMap<Uuid, ActorRef>>>,
+    // actors_map: Arc<Mutex<HashMap<Uuid, ActorRef>>>,
     threads_queue: MessageQueue<ThreadMessage>,
-    alive_threads: usize,
+    alive_threads: Arc<Mutex<usize>>,
+    root: ActorRef,
 }
 
 impl ActorSystem {
     pub fn new(num_of_threads: usize) -> ActorSystem {
         let global_queue: MessageQueue<SystemMessage> = MessageQueue::new();
         let threads_queue: MessageQueue<ThreadMessage> = MessageQueue::new();
-        let actors_map: Arc<Mutex<HashMap<Uuid, ActorRef>>> = Arc::new(Mutex::new(HashMap::new()));
-        let mut alive_threads = 0;
+        // let actors_map: Arc<Mutex<HashMap<Uuid, ActorRef>>> = Arc::new(Mutex::new(HashMap::new()));
+        let alive_threads = Arc::new(Mutex::new(num_of_threads));
 
-        let mut system = ActorSystem {
-            global_queue,
-            actors_map,
-            threads_queue,
-            alive_threads,
+        // Here we're creating root actor which a grandparent of all actors
+        let root = {
+            let pid = Uuid::new_v4();
+            let actor_ref = ActorRef::new(pid, RootActor::new());
+            actor_ref
         };
 
-        for _ in 0..num_of_threads {
+        let system = ActorSystem {
+            global_queue,
+            // actors_map,
+            threads_queue,
+            alive_threads,
+            root,
+        };
+
+        for thread_id in 0..num_of_threads {
             let system = system.clone();
             thread::spawn(move || {
                 loop {
                     let msg = {
                         let head = system.threads_queue.recv();
-                        match head {
-                            Err(_) => continue,
-                            Ok(msg) => msg,
-                        }
+                        if let Ok(msg) = head { msg } else { continue }
                     };
 
                     match msg {
-                        // ThreadMessage::Die => {
-                        //     println!("Thread: {} is dying", thread_id);
-                        //     system.global_queue.send(SystemMessage::Died(thread_id));
-                        //     break;
-                        // }
+                        ThreadMessage::Die(id) => {
+                            if thread_id == id {
+                                system.global_queue.send(SystemMessage::Died(thread_id));
+                                println!("Thread: {} died", thread_id);
+                                break;
+                            } else {
+                                // It's not for us so we have to forward it
+                                system.threads_queue.send(msg);
+                            }
+                        }
                         ThreadMessage::Actor(actor_ref) => {
                             // let entry =
                             // {
@@ -72,26 +84,17 @@ impl ActorSystem {
                             // };
                             // let a: &mut ActorRef = entry.into_mut() as &mut ActorRef;
 
-                            match actor_ref.mailbox.lock().unwrap().pop_front() {
-                                None => continue,
-                                Some(envelope) => {
-                                    let msg = match envelope.message {
-                                        InnerMessage::Message(msg) => msg,
-                                    };
+                            if let Some(envelope) = actor_ref.mailbox.lock().unwrap().pop_front() {
+                                let msg = match envelope.message {
+                                    InnerMessage::Message(msg) => msg,
+                                };
 
-                                    let context = Context::new(system.clone(), actor_ref.clone());
-                                    let to_send = actor_ref.inner.receive(msg, context);
-                                    match to_send {
-                                        None => (),
-                                        Some(messages) => {
-                                            for msg in messages {
-                                                // create messages and put them into ThreadsQueue
-                                                println!(
-                                                    "Actor receive returned message {:?}",
-                                                    msg
-                                                );
-                                            }
-                                        }
+                                let context = Context::new(system.clone(), actor_ref.clone());
+                                let to_send = actor_ref.inner.receive(msg, context);
+                                if let Some(messages) = to_send {
+                                    for msg in messages {
+                                        // create messages and put them into ThreadsQueue
+                                        println!("Actor returned message {:?}", msg);
                                     }
                                 }
                             }
@@ -99,29 +102,35 @@ impl ActorSystem {
                     }
                 }
             });
-            alive_threads += 1;
         }
-        system.alive_threads = alive_threads;
         system
     }
 
-    // TODO: shutdown that allows system actor the shutdown everything when there no more work
-    // fn shutdown(&self) {}
+    // Shutdown allows to stop all threads and clear all memory when there is no more work
+    pub fn terminate(&self) {
+        // Push death order to all threads
+        let alive = self.alive_threads.lock().unwrap();
+        for id in 0..(*alive) {
+            self.threads_queue.send(ThreadMessage::Die(id));
+            println!("Pushed death order")
+        }
+    }
 
-    // TODO: system should have something like system actor which is parent of all actors
-    // when system actor terminates we can kill all actors when because we're storing pids of childs
     pub fn spawn(&self, actor: Arc<Actor>) -> ActorRef {
+        self.spawn_of(self.root.clone(), actor)
+    }
+
+    pub fn spawn_of(&self, parent: ActorRef, actor: Arc<Actor>) -> ActorRef {
         let pid = Uuid::new_v4();
         let actor_ref = ActorRef::new(pid, actor);
 
         // check if we have pids conflict.
-        let mut actors = self.actors_map.lock().unwrap();
-        if !actors.contains_key(&pid) {
-            actors.insert(pid, actor_ref.clone());
+        let mut parent_children = parent.children.lock().unwrap();
+        if !parent_children.contains_key(&pid) {
+            parent_children.insert(pid, actor_ref.clone());
         } else {
             panic!("We have pid duplication!!!");
         }
-        // TODO: add pid to parent children list
         actor_ref
     }
 
@@ -133,8 +142,27 @@ impl ActorSystem {
         self.threads_queue.send(ThreadMessage::Actor(to.clone()));
     }
 
-    pub fn is_alive(&self) -> bool {
-        self.alive_threads > 0
+    pub fn run(&self) {
+        // We're running as long as any thread is running
+        loop {
+            let head = self.global_queue.recv();
+            match head {
+                Err(_) => (),
+                Ok(msg) => {
+                    match msg {
+                        SystemMessage::Died(id) => {
+                            let mut alive = self.alive_threads.lock().unwrap();
+                            println!("Thread {} died!", id);
+                            (*alive) -= 1;
+                            println!("Alive threads: {}", *alive);
+                            if *alive == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -142,9 +170,10 @@ impl Clone for ActorSystem {
     fn clone(&self) -> ActorSystem {
         ActorSystem {
             global_queue: self.global_queue.clone(),
-            actors_map: self.actors_map.clone(),
+            // actors_map: self.actors_map.clone(),
             threads_queue: self.threads_queue.clone(),
-            alive_threads: self.alive_threads,
+            alive_threads: self.alive_threads.clone(),
+            root: self.root.clone(),
         }
     }
 }

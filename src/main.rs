@@ -42,6 +42,9 @@ impl Actor for SomeActor {
         }
         let state = self.state.lock().unwrap();
         println!("I've received some message and my state is: {:?}", *state);
+        if *state == 45 {
+            context.system.terminate();
+        }
         None
     }
 }
@@ -58,30 +61,6 @@ fn main() {
         system.tell(&our_actor, MyMessage::Some(i));
     }
 
-    // for now we want to block everything
-    while system.is_alive() {}
-    // after implementing system.shoutdown we may not need global_queue at all;
-    // kill all threads
-    // for _ in 0..NUM_OF_THREADS {
-    //     system.threads_queue.send(ThreadMessage::Die);
-    //     println!("Pushed death order")
-    // }
-
-    // // wait for all threads death
-    // while system.alive_threads > 0 {
-    //     let head = system.global_queue.recv();
-    //     match head {
-    //         Ok(msg) => {
-    //             match msg {
-    //                 SystemMessage::Died(id) => {
-    //                     println!("Thread {} died!", id);
-    //                     system.alive_threads -= 1;
-    //                     println!("Alive threads: {}", system.alive_threads);
-    //                 }
-    //             }
-    //         }
-    //         Err(_) => println!("Head is empty"),
-
-    //     }
-    // }
+    // Blocks main thread as long as system is running
+    system.run();
 }
