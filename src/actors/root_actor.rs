@@ -10,7 +10,5 @@ impl Actor for RootActor {
         Arc::new(RootActor)
     }
 
-    fn receive(&self, _message: Box<Any>, _context: Context) -> Option<Vec<Box<Any>>> {
-        None
-    }
+    fn receive(&self, _message: Box<Any>, _context: Context) {}
 }

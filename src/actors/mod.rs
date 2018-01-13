@@ -13,7 +13,7 @@ pub use self::actor_ref::ActorRef;
 pub mod actor_system;
 pub use self::actor_system::ActorSystem;
 
-// Every message trait
+// Message trait
 pub trait Message: Clone + Send + Sync + 'static + Any {}
 impl<T> Message for T
 where
@@ -21,11 +21,11 @@ where
 {
 }
 
-// Every actor implementation trait
+// Trait that every actors has to implement to be an actor
 pub trait Actor: Send + Sync + 'static {
     fn new() -> Arc<Self>
     where
         Self: Sized;
 
-    fn receive(&self, message: Box<Any>, context: Context) -> Option<Vec<Box<Any>>>;
+    fn receive(&self, message: Box<Any>, context: Context);
 }

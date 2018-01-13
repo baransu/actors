@@ -16,7 +16,7 @@ pub struct ActorRef {
 
 pub struct Envelope {
     pub message: InnerMessage,
-    // sender: ActorRef,
+    pub sender: Option<ActorRef>,
 }
 
 pub enum InnerMessage {

@@ -3,63 +3,120 @@ extern crate uuid;
 mod actors;
 
 use std::sync::{Mutex, Arc};
-// use std::time::Duration;
 use std::any::Any;
+use std::fs::File;
+use std::io::prelude::*;
 
 use actors::{Actor, ActorSystem, Context};
 
-struct SomeActor {
-    state: Mutex<i32>,
-}
-
-impl SomeActor {
-    fn set_state<F>(&self, f: F)
-    where
-        F: Fn(i32) -> i32,
-    {
-        let mut state = self.state.lock().unwrap();
-        (*state) = f(*state);
-    }
-}
-
-impl Actor for SomeActor {
-    fn new() -> Arc<SomeActor> {
-        let state = Mutex::new(0);
-        Arc::new(SomeActor { state })
-    }
-
-    fn receive(&self, message: Box<Any>, context: Context) -> Option<Vec<Box<Any>>> {
-        println!("My pid is: {}", context.sender.pid);
-        // let our_actor = context.system.spawn(SomeActor::new());
-        // for i in 0..100 {
-        //     context.system.tell(&our_actor, MyMessage::Some(i));
-        // }
-
-        // downcast message back to our type
-        let msg = message.downcast::<MyMessage>().unwrap();
-        match *msg {
-            MyMessage::Some(value) => self.set_state(|v| v + value as i32),
-        }
-        let state = self.state.lock().unwrap();
-        println!("I've received some message and my state is: {:?}", *state);
-        if *state == 45 {
-            context.system.terminate();
-        }
-        None
-    }
-}
-
 #[derive(Clone, Debug)]
-enum MyMessage {
-    Some(u8),
+enum Message<'a> {
+    ProcessFile(&'a str),
+    ProcessLine(String),
+    Result(i32),
 }
+
+struct ManagerState {
+    count: i32,
+    processing: i32,
+}
+
+impl ManagerState {
+    fn new() -> ManagerState {
+        ManagerState {
+            count: 0,
+            processing: 0,
+        }
+    }
+}
+
+struct Manager {
+    state: Mutex<ManagerState>,
+}
+
+impl Actor for Manager {
+    fn new() -> Arc<Manager> {
+        let state = Mutex::new(ManagerState::new());
+        Arc::new(Manager { state })
+    }
+
+    fn receive(&self, message: Box<Any>, context: Context) {
+        let msg = message.downcast::<Message>().unwrap();
+        match *msg {
+            Message::ProcessFile(filename) => {
+                // Read file
+                let mut file = File::open(filename).unwrap();
+                let mut file_content = String::new();
+                file.read_to_string(&mut file_content).unwrap();
+
+                // Split by lines
+                let lines: Vec<&str> = file_content.lines().collect();
+                let count = lines.len();
+
+                // Set how many lines we have and how many results we're expecting
+                let mut state = self.state.lock().unwrap();
+                (*state).processing = count as i32;
+
+                // Spawn workers and send workers to them
+                for line in lines.iter() {
+                    let msg = Message::ProcessLine(line.to_string());
+                    let worker = context.system.spawn(Worker::new());
+                    context.system.tell(Some(context.me.clone()), &worker, msg);
+                }
+            }
+            Message::Result(count) => {
+                let mut state = self.state.lock().unwrap();
+                (*state).processing -= 1;
+                (*state).count += count;
+
+                println!(
+                    "Received result {} so all words count is {}.",
+                    count,
+                    (*state).count
+                );
+
+                if (*state).processing == 0 {
+                    context.system.terminate();
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+struct Worker;
+
+impl Actor for Worker {
+    fn new() -> Arc<Worker> {
+        Arc::new(Worker)
+    }
+
+    fn receive(&self, message: Box<Any>, context: Context) {
+        let msg = message.downcast::<Message>().unwrap();
+        match *msg {
+            Message::ProcessLine(line) => {
+                // Get words count
+                let characters: Vec<&str> = line.split(' ').collect();
+
+                // If we have sender we can send back the result
+                if let Some(sender) = context.sender {
+                    context.system.tell(
+                        None,
+                        &sender,
+                        Message::Result(characters.len() as i32),
+                    )
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 
 fn main() {
     let system = ActorSystem::new(8);
-    let our_actor = system.spawn(SomeActor::new());
-    for i in 0..10 {
-        system.tell(&our_actor, MyMessage::Some(i));
-    }
+    let manager = system.spawn(Manager::new());
+    system.tell(None, &manager, Message::ProcessFile("foo.txt"));
 
     // Blocks main thread as long as system is running
     system.run();
