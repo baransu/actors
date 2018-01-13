@@ -33,6 +33,10 @@ impl ActorRef {
             children: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    pub fn eq(fst: ActorRef, snd: ActorRef) -> bool {
+        fst.pid == snd.pid
+    }
 }
 
 impl Clone for ActorRef {
