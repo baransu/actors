@@ -34,7 +34,7 @@ impl ActorSystem {
         let threads_queue: MessageQueue<ThreadMessage> = MessageQueue::new();
         let alive_threads = Arc::new(Mutex::new(num_of_threads));
 
-        // Here we're creating root actor which a grandparent of all actors
+        // Here we're creating root actor which is a grandparent of all actors
         let root = {
             let pid = Uuid::new_v4();
             let actor_ref = ActorRef::new(pid, RootActor::new());
@@ -64,7 +64,7 @@ impl ActorSystem {
                                 println!("Thread {} terminated!", thread_id);
                                 break;
                             } else {
-                                // It's not for us so we have to forward it
+                                // Message may be not for out thread so we have to forward it back to queue
                                 system.threads_queue.send(msg);
                             }
                         }

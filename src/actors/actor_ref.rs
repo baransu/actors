@@ -23,7 +23,7 @@ pub enum InnerMessage {
     Message(Box<Any + Send>),
 }
 
-// Actor info and struct
+// Actor struct that contains it's mailbox, children and other stuff
 impl ActorRef {
     pub fn new(pid: Uuid, actor: Arc<Actor>) -> ActorRef {
         ActorRef {
