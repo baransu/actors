@@ -155,14 +155,14 @@ impl Actor for Worker {
         match *msg {
             Message::ProcessLine(line) => {
                 // Get words count
-                let characters: Vec<&str> = line.split(' ').collect();
+                let words: Vec<&str> = line.split(' ').collect();
 
                 // If we have sender we can send back the result
                 if let Some(sender) = context.sender {
                     context.system.tell(
                         Some(context.me),
                         &sender,
-                        Message::Result(characters.len() as i32),
+                        Message::Result(words.len() as i32),
                     )
                 }
             }
